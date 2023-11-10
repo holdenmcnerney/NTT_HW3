@@ -3,6 +3,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import navpy as nav
+import scipy.linalg as scila
 from dataclasses import dataclass
 
 @dataclass
@@ -116,8 +117,10 @@ class LooseGnssIns:
         lat = position[0]
         long = position[1]
         h = position[2]
-        vNx = velocity[1]
         vNy = velocity[0]
+        vNx= velocity[1]
+        # vNx = velocity[0]
+        # vNy = velocity[1]
         vNz = velocity[2]
         phi = euler_angles[0]
         theta = euler_angles[1]
@@ -134,6 +137,45 @@ class LooseGnssIns:
         f_B = self.imu_data[idx-1][4:7] + acc_bias
         f_B = self.transpose_vec(f_B)
         
+         # COVARIANCE UPDATE
+        A_mat = np.block([[-self.vec_to_skew(omega_N_EN), np.eye(3), np.zeros((3, 3)), \
+                           np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [np.linalg.norm(g_N) / a * np.diagflat([-1, -1, 2]), \
+                           -self.vec_to_skew(2 * omega_N_IE + omega_N_EN), \
+                           self.vec_to_skew(self.DCM @ f_B), self.DCM, np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), -self.vec_to_skew(omega_N_IN), \
+                           np.zeros((3, 3)), -self.DCM], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), \
+                           -1 / self.tau_a * np.eye(3), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), \
+                           -1 / self.tau_g * np.eye(3)]])
+        
+        L_mat = np.block([[np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [self.DCM, np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), -self.DCM, np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)]])
+        
+        self.sigma_ba = 0.0005 * np.linalg.norm(g_N)
+        self.sigma_wa = 0.12 * np.linalg.norm(g_N)
+        sigma_ua_sq = 2 * self.sigma_ba**2 / self.tau_a
+        sigma_ug_sq = 2 * self.sigma_bg**2 / self.tau_g
+
+        S_PSD = np.block([[self.sigma_wa**2 * np.eye(3), np.zeros((3, 3)), \
+                           np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), self.sigma_wg**2 * np.eye(3), \
+                           np.zeros((3, 3)), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), \
+                           sigma_ua_sq * np.eye(3), np.zeros((3, 3))], \
+                          [np.zeros((3, 3)), np.zeros((3, 3)), \
+                           np.zeros((3, 3)), sigma_ug_sq * np.eye(3)]])
+
+        F_mat = scila.expm(A_mat * time_diff)
+        Q_mat = (np.eye(15) + time_diff * A_mat) \
+                @ (time_diff * L_mat @ S_PSD @ np.transpose(L_mat))
+        self.P = F_mat @ self.P @ np.transpose(F_mat) + Q_mat
+        # print(f'''Time: {self.gps_data[idx][0]} P_k|k-1_norm: {np.linalg.norm(self.P)}''')
+
         # ATTITUDE UPDATE
         Amat = 1 / np.cos(theta) * \
             np.array([[1, np.sin(phi) * np.sin(theta), np.cos(phi) * np.sin(theta)], \
@@ -157,54 +199,12 @@ class LooseGnssIns:
                             [0, 0, -1]])
         position = self.transpose_vec(position) + time_diff * p_E_dot @ velocity
 
-        # NEED TO UPDATE GYRO AND ACCEL
-
-        # NEED TO CORRECT FOR VERTICAL CHANNEL HERE
-
         # STATE UPDATE
         state = np.hstack((self.transpose_vec(position), \
                            self.transpose_vec(velocity), \
                            self.transpose_vec(euler_angles), \
                            self.transpose_vec(self.acc_bias), \
                            self.transpose_vec(self.gyro_bias)))
-        
-        # COVARIANCE UPDATE
-        A_mat = np.block([[-self.vec_to_skew(omega_N_EN), np.eye(3), np.zeros((3, 3)), \
-                           np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [np.linalg.norm(g_N) / a * np.diagflat([-1, -1, 2]), \
-                           -self.vec_to_skew(2 * omega_N_IE + omega_N_EN), \
-                           self.vec_to_skew(self.DCM @ f_B), self.DCM, np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), -self.vec_to_skew(omega_N_IN), \
-                           np.zeros((3, 3)), -self.DCM], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), \
-                           -1 / self.tau_a * np.eye(3), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), \
-                           -1 / self.tau_g * np.eye(3)]])
-        
-        L_mat = np.block([[np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [self.DCM, np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), -self.DCM, np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), np.zeros((3, 3)), np.eye(3)]])
-        
-        self.sigma_ba = 0.0005 #* np.linalg.norm(g_N)
-        self.sigma_wa = 0.12 #* np.linalg.norm(g_N)
-        sigma_ua_sq = 2 * self.sigma_ba**2 / self.tau_a
-        sigma_ug_sq = 2 * self.sigma_bg**2 / self.tau_g
-
-        S_PSD = np.block([[self.sigma_wa**2 * np.eye(3), np.zeros((3, 3)), \
-                           np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), self.sigma_wg**2 * np.eye(3), \
-                           np.zeros((3, 3)), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), \
-                           sigma_ua_sq * np.eye(3), np.zeros((3, 3))], \
-                          [np.zeros((3, 3)), np.zeros((3, 3)), \
-                           np.zeros((3, 3)), sigma_ug_sq * np.eye(3)]])
-
-        F_mat = np.exp(A_mat * time_diff)
-        Q_mat = (np.eye(15) + time_diff * A_mat) \
-        * (time_diff * L_mat @ S_PSD @ np.transpose(L_mat))
-        self.P = F_mat @ self.P @ np.transpose(F_mat) + Q_mat
 
         return state
     
@@ -228,21 +228,28 @@ class LooseGnssIns:
 
         R_k = np.diagflat([self.sigma_p, self.sigma_p, self.sigma_p, \
                            self.sigma_v, self.sigma_v, self.sigma_v])
-        S_k = H_k @ self.P @ np.transpose(H_k) + R_k 
+        S_k = H_k @ self.P @ np.transpose(H_k) + np.eye(6) @ R_k @ np.transpose(np.eye(6))
         K_k = self.P @ np.transpose(H_k) @ np.linalg.inv(S_k)
         error_state = K_k @ del_y
         self.P = self.P - K_k @ S_k @ np.transpose(K_k)
 
-        # BAD - ADDING NED TO LLA
+        # MEASUREMENT UPDATE
+        error_state_position_ned = error_state[0:3]
+        error_state_position_lla = nav.ned2lla(error_state_position_ned, \
+                                               ref_location_lla[0], \
+                                               ref_location_lla[1], \
+                                               ref_location_lla[2], 
+                                               latlon_unit='rad')
+
         position = cur_state[0:2] + \
-                      np.array([error_state[0][0] \
+                      np.array([error_state_position_lla[0] \
                       / (self.rad_of_curve('north', cur_state[0]) + cur_state[2]), \
-                      error_state[1][0] \
+                      error_state_position_lla[1] \
                       / ((self.rad_of_curve('east', cur_state[0]) + cur_state[2]) \
                       * np.cos(cur_state[0]))])
         position = np.append(position, self.gps_data[idx][3])
         velocity = cur_state[3:5] + \
-                      np.array([error_state[3][0], error_state[4][0]])
+                   np.array([error_state[3][0], error_state[4][0]])
         velocity = np.append(velocity, self.gps_data[idx][6])
         self.DCM = (np.eye(3) - self.vec_to_skew(error_state[6:9])) @ self.DCM
         euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
@@ -255,6 +262,8 @@ class LooseGnssIns:
                            euler_angles, \
                            self.transpose_vec(self.acc_bias), \
                            self.transpose_vec(self.gyro_bias)))
+        
+        print(state)
 
         return state
     
@@ -263,7 +272,13 @@ class LooseGnssIns:
         for idx, (gps, imu) in enumerate(zip(self.gps_data, self.imu_data)):
             if idx == 0:
                 cur_state = self.initial_state()
+                # self.P = np.diagflat([10, 10, 10, 10, 10, 10, 0.05, \
+                #                       0.05, 0.05, 0.05, \
+                #                       0.05, 0.05, 0.05, 0.05, 0.05])
                 self.P = 10 * np.eye(15)
+                # self.P[6][6] = 5 * np.pi / 180
+                # self.P[7][7] = 5 * np.pi / 180
+                # self.P[8][8] = 5 * np.pi / 180
                 self.time_hist = np.insert(cur_state, 0, self.gps_data[0][0])
             else:
                 cur_state = self.update_state_ins(idx)
@@ -275,6 +290,10 @@ class LooseGnssIns:
             old_imu = imu
 
         return self.time_hist
+    
+    def plot_all(self, time_hist):
+
+        return 1
 
 def main():
 
