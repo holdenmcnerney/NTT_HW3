@@ -63,9 +63,9 @@ class LooseGnssIns:
     def gav_vector(self, lat: float, alt:float):
 
         g0 = 9.7803253359 * (1 + 0.001931853 * np.sin(lat)**2) \
-        / np.sqrt(1 - 0.00669438 * np.sin(lat)**2)
+            / np.sqrt(1 - 0.00669438 * np.sin(lat)**2)
         g = g0 * (1 - (3.157042870579883e-7 - 2.10268965044023439e-9 * np.sin(lat)**2)\
-              * alt + 7.374516772941995e-14 * alt**2) 
+            * alt + 7.374516772941995e-14 * alt**2) 
         gav_vec = np.array([[0], [0], [g]])
 
         return gav_vec
@@ -115,29 +115,61 @@ class LooseGnssIns:
             gyro_bias = self.time_hist[idx - 1][13:16]
 
         lat = position[0]
-        long = position[1]
         h = position[2]
-        vNy = velocity[0]
-        vNx= velocity[1]
-        # vNx = velocity[0]
-        # vNy = velocity[1]
-        vNz = velocity[2]
+        vNx = velocity[0]
+        vNy = velocity[1]
         phi = euler_angles[0]
         theta = euler_angles[1]
-        psi = euler_angles[2]
 
-        # SETUP
+        # INITIALIZE DCM
         self.DCM = self.DCM_calc(euler_angles)
+
+        # ATTITUDE UPDATE
+        A_euler = 1 / np.cos(theta) * \
+                    np.array([[1, np.sin(phi) * np.sin(theta), np.cos(phi) * np.sin(theta)], \
+                      [0, np.cos(phi) * np.cos(theta), -np.sin(phi) * np.cos(theta)], \
+                      [0, np.sin(phi), np.cos(phi)]])
+        omega_N_IE = 7.292115e-5 * np.array([[np.cos(lat)], [0], [-np.sin(lat)]])
+        omega_N_EN = np.array([[vNy / (self.rad_of_curve('east', lat) + h)], \
+                               [-vNx / (self.rad_of_curve('north', lat) + h)], \
+                               [-vNy * np.tan(lat) / (self.rad_of_curve('east', lat) + h)]])
+        omega_N_IN = omega_N_IE + omega_N_EN
+        omega_B_IB = self.imu_data[idx-1][1:4] + gyro_bias
+        omega_B_NB = self.transpose_vec(omega_B_IB) \
+                    - np.linalg.inv(self.DCM) @ self.transpose_vec(omega_N_IN)
+        euler_angles = self.transpose_vec(euler_angles) + time_diff * A_euler @ omega_B_NB
+        
+        # VELOCITY UPDATE
+        f_B_t = self.imu_data[idx-1][4:7] + acc_bias
+        f_B = self.transpose_vec(f_B_t)
+        g_N = self.gav_vector(lat, h)
+        v_N_dot = self.DCM @ f_B + g_N \
+                - self.vec_to_skew(2 * omega_N_IE + omega_N_EN) \
+                @ self.transpose_vec(velocity)
+        velocity = self.transpose_vec(velocity) + time_diff * v_N_dot
+
+        # POSITION UPDATE
+        p_E_dot = np.array([[1 / (self.rad_of_curve('north', lat) + h), 0, 0], \
+                            [0, 1 / ((self.rad_of_curve('east', lat) + h) * np.cos(lat)), 0], \
+                            [0, 0, -1]])
+        position = self.transpose_vec(position) + time_diff * p_E_dot @ velocity
+
+        # UPDATING VALUES FOR COVARIANCE UPDATE
+        lat = position[0][0]
+        h = position[2][0]
+        vNx = velocity[0][0]
+        vNy = velocity[1][0]
+        phi = euler_angles[0][0]
+        theta = euler_angles[1][0]
         g_N = self.gav_vector(lat, h)
         omega_N_IE = 7.292115e-5 * np.array([[np.cos(lat)], [0], [-np.sin(lat)]])
         omega_N_EN = np.array([[vNy / (self.rad_of_curve('east', lat) + h)], \
                                [-vNx / (self.rad_of_curve('north', lat) + h)], \
                                [-vNy * np.tan(lat) / (self.rad_of_curve('east', lat) + h)]])
         omega_N_IN = omega_N_IE + omega_N_EN
-        f_B = self.imu_data[idx-1][4:7] + acc_bias
-        f_B = self.transpose_vec(f_B)
+        self.DCM = self.DCM_calc(self.transpose_vec(euler_angles))
         
-         # COVARIANCE UPDATE
+        # COVARIANCE UPDATE
         A_mat = np.block([[-self.vec_to_skew(omega_N_EN), np.eye(3), np.zeros((3, 3)), \
                            np.zeros((3, 3)), np.zeros((3, 3))], \
                           [np.linalg.norm(g_N) / a * np.diagflat([-1, -1, 2]), \
@@ -167,33 +199,10 @@ class LooseGnssIns:
                           [np.zeros((3, 3)), np.zeros((3, 3)), \
                            np.zeros((3, 3)), sigma_ug_sq * np.eye(3)]])
         F_mat = scila.expm(A_mat * time_diff)
-        Q_mat = (np.eye(15) + time_diff * A_mat) \
-                @ (time_diff * L_mat @ S_PSD @ np.transpose(L_mat))
+        E22 = scila.expm(time_diff * np.transpose(A_mat))
+        E12 = scila.expm(time_diff * L_mat @ S_PSD @ np.transpose(L_mat))
+        Q_mat = np.transpose(E22) @ E12
         self.P = F_mat @ self.P @ np.transpose(F_mat) + Q_mat
-        # print(f'''Time: {self.gps_data[idx][0]} P_k|k-1_norm: {np.linalg.norm(self.P)}''')
-
-        # ATTITUDE UPDATE
-        Amat = 1 / np.cos(theta) * \
-            np.array([[1, np.sin(phi) * np.sin(theta), np.cos(phi) * np.sin(theta)], \
-                      [0, np.cos(phi) * np.cos(theta), -np.sin(phi) * np.cos(theta)], \
-                      [0, np.sin(phi), np.cos(phi)]])
-        omega_B_IB = self.imu_data[idx-1][1:4] + gyro_bias
-        omega_B_NB = self.transpose_vec(omega_B_IB) \
-                    - np.linalg.inv(self.DCM) @ self.transpose_vec(omega_N_IN)
-        euler_angles = self.transpose_vec(euler_angles) + time_diff * Amat @ omega_B_NB
-        self.DCM = self.DCM_calc(self.transpose_vec(euler_angles))
-        
-        # VELOCITY UPDATE
-        v_N_dot = self.DCM @ f_B + g_N \
-                - self.vec_to_skew(2 * omega_N_IE + omega_N_EN) \
-                @ self.transpose_vec(velocity)
-        velocity = self.transpose_vec(velocity) + time_diff * v_N_dot
-
-        # POSITION UPDATE
-        p_E_dot = np.array([[1 / (self.rad_of_curve('north', lat) + h), 0, 0], \
-                            [0, 1 / ((self.rad_of_curve('east', lat) + h) * np.cos(lat)), 0], \
-                            [0, 0, -1]])
-        position = self.transpose_vec(position) + time_diff * p_E_dot @ velocity
 
         # STATE UPDATE
         state = np.hstack((self.transpose_vec(position), \
@@ -215,14 +224,15 @@ class LooseGnssIns:
                                    ref_location_lla[1], \
                                    ref_location_lla[2], 
                                    latlon_unit='rad')
-        gps_y_vec = np.block([[self.transpose_vec(gps_location_ned)], \
+        gps_y_vec_ned = np.block([[self.transpose_vec(gps_location_ned)], \
                               [self.transpose_vec(self.gps_data[idx][4:7])]])
-        ins_y_vec = np.block([[np.zeros((3,1))], [self.transpose_vec(cur_state[3:6])]])
-        del_y = gps_y_vec - ins_y_vec
+        ins_y_vec_ned = np.block([[np.zeros((3,1))], [self.transpose_vec(cur_state[3:6])]])
+        del_y = gps_y_vec_ned - ins_y_vec_ned
         H_k = np.block([np.eye(6), np.zeros((6, 9))])
-        R_k = np.diagflat([self.sigma_p, self.sigma_p, self.sigma_p, \
-                           self.sigma_v, self.sigma_v, self.sigma_v])
-        S_k = H_k @ self.P @ np.transpose(H_k) + np.eye(6) @ R_k @ np.transpose(np.eye(6))
+        # R_k may be incorrect
+        R_k = np.diagflat([self.sigma_p**2, self.sigma_p**2, self.sigma_p**2, \
+                           self.sigma_v**2, self.sigma_v**2, self.sigma_v**2])
+        S_k = H_k @ self.P @ np.transpose(H_k) + np.eye(6) @ R_k @ np.eye(6)
         K_k = self.P @ np.transpose(H_k) @ np.linalg.inv(S_k)
         error_state = K_k @ del_y
         self.P = self.P - K_k @ S_k @ np.transpose(K_k)
@@ -234,33 +244,31 @@ class LooseGnssIns:
                                                ref_location_lla[1], \
                                                ref_location_lla[2], 
                                                latlon_unit='rad')
-        position = cur_state[0:2] + \
-                      np.array([error_state_position_lla[0] \
+        position = cur_state[0:3] + \
+                      np.array([error_state_position_ned[0][0] \
                       / (self.rad_of_curve('north', cur_state[0]) + cur_state[2]), \
-                      error_state_position_lla[1] \
-                      / ((self.rad_of_curve('east', cur_state[0]) + cur_state[2]) \
-                      * np.cos(cur_state[0]))])
-        position = np.append(position, self.gps_data[idx][3])
-        # position = cur_state[0:2] + \
-        #               np.array([error_state_position_lla[0] \
-        #               / (self.rad_of_curve('north', cur_state[0]) + cur_state[2]), \
-        #               error_state_position_lla[1] \
-        #               / ((self.rad_of_curve('east', cur_state[0]) + cur_state[2]) \
-        #               * np.cos(cur_state[0]))])
-        # position = np.append(position, self.gps_data[idx][3])
-        velocity = cur_state[3:5] + \
-                   np.array([error_state[3][0], error_state[4][0]])
-        velocity = np.append(velocity, self.gps_data[idx][6])
+                      error_state_position_ned[1][0] \
+                      / ((self.rad_of_curve('east', cur_state[0]) + cur_state[2]) * np.cos(cur_state[0])), \
+                      - error_state_position_ned[2][0]])
+        position[2] =  self.gps_data[idx][3]
+        velocity = cur_state[3:6] + \
+                   np.array([error_state[3][0], error_state[4][0], error_state[5][0]])
+        velocity[2] = self.gps_data[idx][6]
+        
+        # Something is wrong here when adding error state euler angle skew matrix
+        # if logic is incorrect but makes the script run
         sinDCM = -np.arcsin(self.DCM[2][0])
-        self.DCM = (np.eye(3) - self.vec_to_skew(error_state[6:9])) @ self.DCM
+        self.DCM = (np.eye(3) + self.vec_to_skew(error_state[6:9])) @ self.DCM
         if np.isnan(-np.arcsin(self.DCM[2][0])):
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     sinDCM, \
                                     np.arctan(self.DCM[1][0] / self.DCM[0][0])])
+
         else:
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     -np.arcsin(self.DCM[2][0]), \
                                     np.arctan(self.DCM[1][0] / self.DCM[0][0])])
+            
         self.acc_bias = self.acc_bias + error_state[9:12]
         self.gyro_bias = self.gyro_bias + error_state[12:15]
         state = np.hstack((position, \
@@ -273,7 +281,7 @@ class LooseGnssIns:
     
     def compute_time_history(self) -> np.array:
 
-        for idx, (gps, imu) in enumerate(zip(self.gps_data, self.imu_data)):
+        for idx, gps in enumerate(self.gps_data):
             if idx == 0:
                 cur_state = self.initial_state()
                 self.P = 10 * np.eye(15)
@@ -285,7 +293,6 @@ class LooseGnssIns:
                 self.time_hist = np.vstack((self.time_hist, \
                                             np.insert(cur_state, 0, self.gps_data[idx][0])))
             old_gps = gps
-            old_imu = imu
 
         return self.time_hist
     
@@ -295,8 +302,8 @@ class LooseGnssIns:
 
 def main():
 
-    gps_data = np.genfromtxt('gps.txt', delimiter=',', dtype=float)
-    imu_data = np.genfromtxt('imu.txt', delimiter=',', dtype=float)
+    gps_data = np.loadtxt('gps.txt', delimiter=',', dtype=float)
+    imu_data = np.loadtxt('imu.txt', delimiter=',', dtype=float)
     
     data = LooseGnssIns(gps_data, imu_data)
     time_hist = data.compute_time_history()
@@ -314,66 +321,66 @@ def main():
     axs1[1].set_title('Altitude vs Time')
     
     # FIGURE 2
-    fig2, axs2 = plt.subplots(4, 3)
-    axs2[0, 0].plot(time_hist[:, 0], time_hist[:, 4])
-    axs2[0, 0].set_xlabel('Time')
-    axs2[0, 0].set_ylabel('North Velocity')
-    axs2[0, 0].set_title('North Velocity vs Time')
+    # fig2, axs2 = plt.subplots(4, 3)
+    # axs2[0, 0].plot(time_hist[:, 0], time_hist[:, 4])
+    # axs2[0, 0].set_xlabel('Time')
+    # axs2[0, 0].set_ylabel('North Velocity')
+    # axs2[0, 0].set_title('North Velocity vs Time')
 
-    axs2[0, 1].plot(time_hist[:, 0], time_hist[:, 5])
-    axs2[0, 1].set_xlabel('Time')
-    axs2[0, 1].set_ylabel('East Velocity')
-    axs2[0, 1].set_title('East Velocity vs Time')
+    # axs2[0, 1].plot(time_hist[:, 0], time_hist[:, 5])
+    # axs2[0, 1].set_xlabel('Time')
+    # axs2[0, 1].set_ylabel('East Velocity')
+    # axs2[0, 1].set_title('East Velocity vs Time')
 
-    axs2[0, 2].plot(time_hist[:, 0], time_hist[:, 6])
-    axs2[0, 2].set_xlabel('Time')
-    axs2[0, 2].set_ylabel('Down Velocity')
-    axs2[0, 2].set_title('Down Velocity vs Time')
+    # axs2[0, 2].plot(time_hist[:, 0], time_hist[:, 6])
+    # axs2[0, 2].set_xlabel('Time')
+    # axs2[0, 2].set_ylabel('Down Velocity')
+    # axs2[0, 2].set_title('Down Velocity vs Time')
 
-    axs2[1, 0].plot(time_hist[:, 0], time_hist[:, 7])
-    axs2[1, 0].set_xlabel('Time')
-    axs2[1, 0].set_ylabel('Roll')
-    axs2[1, 0].set_title('Roll vs Time')
+    # axs2[1, 0].plot(time_hist[:, 0], time_hist[:, 7])
+    # axs2[1, 0].set_xlabel('Time')
+    # axs2[1, 0].set_ylabel('Roll')
+    # axs2[1, 0].set_title('Roll vs Time')
 
-    axs2[1, 1].plot(time_hist[:, 0], time_hist[:, 8])
-    axs2[1, 1].set_xlabel('Time')
-    axs2[1, 1].set_ylabel('Pitch')
-    axs2[1, 1].set_title('Pitch vs Time')
+    # axs2[1, 1].plot(time_hist[:, 0], time_hist[:, 8])
+    # axs2[1, 1].set_xlabel('Time')
+    # axs2[1, 1].set_ylabel('Pitch')
+    # axs2[1, 1].set_title('Pitch vs Time')
 
-    axs2[1, 2].plot(time_hist[:, 0], time_hist[:, 9])
-    axs2[1, 2].set_xlabel('Time')
-    axs2[1, 2].set_ylabel('Yaw')
-    axs2[1, 2].set_title('Yaw vs Time')
+    # axs2[1, 2].plot(time_hist[:, 0], time_hist[:, 9])
+    # axs2[1, 2].set_xlabel('Time')
+    # axs2[1, 2].set_ylabel('Yaw')
+    # axs2[1, 2].set_title('Yaw vs Time')
 
-    axs2[2, 0].plot(time_hist[:, 0], time_hist[:, 10])
-    axs2[2, 0].set_xlabel('Time')
-    axs2[2, 0].set_ylabel('Accelerometer X Bias')
-    axs2[2, 0].set_title('Accelerometer X Bias vs Time')
+    # axs2[2, 0].plot(time_hist[:, 0], time_hist[:, 10])
+    # axs2[2, 0].set_xlabel('Time')
+    # axs2[2, 0].set_ylabel('Accelerometer X Bias')
+    # axs2[2, 0].set_title('Accelerometer X Bias vs Time')
 
-    axs2[2, 1].plot(time_hist[:, 0], time_hist[:, 11])
-    axs2[2, 1].set_xlabel('Time')
-    axs2[2, 1].set_ylabel('Accelerometer Y Bias')
-    axs2[2, 1].set_title('Accelerometer Y Bias vs Time')
+    # axs2[2, 1].plot(time_hist[:, 0], time_hist[:, 11])
+    # axs2[2, 1].set_xlabel('Time')
+    # axs2[2, 1].set_ylabel('Accelerometer Y Bias')
+    # axs2[2, 1].set_title('Accelerometer Y Bias vs Time')
 
-    axs2[2, 2].plot(time_hist[:, 0], time_hist[:, 12])
-    axs2[2, 2].set_xlabel('Time')
-    axs2[2, 2].set_ylabel('Accelerometer Z Bias')
-    axs2[2, 2].set_title('Accelerometer Z Bias vs Time')
+    # axs2[2, 2].plot(time_hist[:, 0], time_hist[:, 12])
+    # axs2[2, 2].set_xlabel('Time')
+    # axs2[2, 2].set_ylabel('Accelerometer Z Bias')
+    # axs2[2, 2].set_title('Accelerometer Z Bias vs Time')
 
-    axs2[3, 0].plot(time_hist[:, 0], time_hist[:, 13])
-    axs2[3, 0].set_xlabel('Time')
-    axs2[3, 0].set_ylabel('Gyroscope X Bias')
-    axs2[3, 0].set_title('Gyroscope X Bias vs Time')
+    # axs2[3, 0].plot(time_hist[:, 0], time_hist[:, 13])
+    # axs2[3, 0].set_xlabel('Time')
+    # axs2[3, 0].set_ylabel('Gyroscope X Bias')
+    # axs2[3, 0].set_title('Gyroscope X Bias vs Time')
 
-    axs2[3, 1].plot(time_hist[:, 0], time_hist[:, 14])
-    axs2[3, 1].set_xlabel('Time')
-    axs2[3, 1].set_ylabel('Gyroscope Y Bias')
-    axs2[3, 1].set_title('Gyroscope Y Bias vs Time')
+    # axs2[3, 1].plot(time_hist[:, 0], time_hist[:, 14])
+    # axs2[3, 1].set_xlabel('Time')
+    # axs2[3, 1].set_ylabel('Gyroscope Y Bias')
+    # axs2[3, 1].set_title('Gyroscope Y Bias vs Time')
 
-    axs2[3, 2].plot(time_hist[:, 0], time_hist[:, 15])
-    axs2[3, 2].set_xlabel('Time')
-    axs2[3, 2].set_ylabel('Gyroscope Z Bias')
-    axs2[3, 2].set_title('Gyroscope Z Bias vs Time')
+    # axs2[3, 2].plot(time_hist[:, 0], time_hist[:, 15])
+    # axs2[3, 2].set_xlabel('Time')
+    # axs2[3, 2].set_ylabel('Gyroscope Z Bias')
+    # axs2[3, 2].set_title('Gyroscope Z Bias vs Time')
     plt.show()
 
     return 1
