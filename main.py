@@ -28,13 +28,13 @@ class LooseGnssIns:
     def vec_to_skew(self, vec: np.array) -> np.array:
 
         if vec.ndim == 1:
-            skew_mat = np.array([[0, -vec[2], vec[1]], \
-                             [vec[2], 0, -vec[0]], \
-                             [-vec[1], vec[0], 0]])
+            skew_mat = np.array([[0, vec[2], -vec[1]], \
+                             [-vec[2], 0, vec[0]], \
+                             [vec[1], -vec[0], 0]])
         else: 
-            skew_mat = np.array([[0, -vec[2][0], vec[1][0]], \
-                                [vec[2][0], 0, -vec[0][0]], \
-                                [-vec[1][0], vec[0][0], 0]])
+            skew_mat = np.array([[0, vec[2][0], -vec[1][0]], \
+                                [-vec[2][0], 0, vec[0][0]], \
+                                [vec[1][0], -vec[0][0], 0]])
 
         return skew_mat
     
@@ -116,8 +116,8 @@ class LooseGnssIns:
 
         lat = position[0]
         h = position[2]
-        vNx = velocity[0]
-        vNy = velocity[1]
+        vNx = velocity[1]
+        vNy = velocity[0]
         phi = euler_angles[0]
         theta = euler_angles[1]
 
@@ -157,8 +157,8 @@ class LooseGnssIns:
         # UPDATING VALUES FOR COVARIANCE UPDATE
         lat = position[0][0]
         h = position[2][0]
-        vNx = velocity[0][0]
-        vNy = velocity[1][0]
+        vNx = velocity[1][0]
+        vNy = velocity[0][0]
         phi = euler_angles[0][0]
         theta = euler_angles[1][0]
         g_N = self.gav_vector(lat, h)
@@ -229,9 +229,8 @@ class LooseGnssIns:
         ins_y_vec_ned = np.block([[np.zeros((3,1))], [self.transpose_vec(cur_state[3:6])]])
         del_y = gps_y_vec_ned - ins_y_vec_ned
         H_k = np.block([np.eye(6), np.zeros((6, 9))])
-        # R_k may be incorrect
-        R_k = np.diagflat([self.sigma_p**2, self.sigma_p**2, self.sigma_p**2, \
-                           self.sigma_v**2, self.sigma_v**2, self.sigma_v**2])
+        R_k = np.diagflat([self.sigma_p, self.sigma_p, self.sigma_p, \
+                           self.sigma_v, self.sigma_v, self.sigma_v])
         S_k = H_k @ self.P @ np.transpose(H_k) + np.eye(6) @ R_k @ np.eye(6)
         K_k = self.P @ np.transpose(H_k) @ np.linalg.inv(S_k)
         error_state = K_k @ del_y
@@ -239,11 +238,6 @@ class LooseGnssIns:
 
         # MEASUREMENT UPDATE
         error_state_position_ned = error_state[0:3]
-        error_state_position_lla = nav.ned2lla(error_state_position_ned, \
-                                               ref_location_lla[0], \
-                                               ref_location_lla[1], \
-                                               ref_location_lla[2], 
-                                               latlon_unit='rad')
         position = cur_state[0:3] + \
                       np.array([error_state_position_ned[0][0] \
                       / (self.rad_of_curve('north', cur_state[0]) + cur_state[2]), \
@@ -258,19 +252,20 @@ class LooseGnssIns:
         # Something is wrong here when adding error state euler angle skew matrix
         # if logic is incorrect but makes the script run
         sinDCM = -np.arcsin(self.DCM[2][0])
-        self.DCM = (np.eye(3) + self.vec_to_skew(error_state[6:9])) @ self.DCM
+        self.DCM = (np.eye(3) - self.vec_to_skew(error_state[6:9])) @ self.DCM
         if np.isnan(-np.arcsin(self.DCM[2][0])):
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     sinDCM, \
                                     np.arctan(self.DCM[1][0] / self.DCM[0][0])])
-
+            # print(idx)
         else:
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     -np.arcsin(self.DCM[2][0]), \
                                     np.arctan(self.DCM[1][0] / self.DCM[0][0])])
-            
+    
         self.acc_bias = self.acc_bias + error_state[9:12]
         self.gyro_bias = self.gyro_bias + error_state[12:15]
+
         state = np.hstack((position, \
                            velocity, \
                            euler_angles, \
@@ -296,7 +291,82 @@ class LooseGnssIns:
 
         return self.time_hist
     
-    def plot_all(self, time_hist):
+    def plot_all(self):
+
+        # FIGURE 1
+        fig1, axs1 = plt.subplots(1, 2)
+        axs1[0].plot(self.time_hist[:, 2], self.time_hist[:, 1])
+        axs1[0].set_xlabel('East')
+        axs1[0].set_ylabel('North')
+        axs1[0].set_title('East vs North')
+
+        axs1[1].plot(self.time_hist[:, 0], self.time_hist[:, 3])
+        axs1[1].set_xlabel('Time')
+        axs1[1].set_ylabel('Altitude')
+        axs1[1].set_title('Altitude vs Time')
+        
+        # FIGURE 2
+        fig2, axs2 = plt.subplots(4, 3)
+        axs2[0, 0].plot(self.time_hist[:, 0], self.time_hist[:, 4])
+        axs2[0, 0].set_xlabel('Time')
+        axs2[0, 0].set_ylabel('North Velocity')
+        axs2[0, 0].set_title('North Velocity vs Time')
+
+        axs2[0, 1].plot(self.time_hist[:, 0], self.time_hist[:, 5])
+        axs2[0, 1].set_xlabel('Time')
+        axs2[0, 1].set_ylabel('East Velocity')
+        axs2[0, 1].set_title('East Velocity vs Time')
+
+        axs2[0, 2].plot(self.time_hist[:, 0], self.time_hist[:, 6])
+        axs2[0, 2].set_xlabel('Time')
+        axs2[0, 2].set_ylabel('Down Velocity')
+        axs2[0, 2].set_title('Down Velocity vs Time')
+
+        axs2[1, 0].plot(self.time_hist[:, 0], self.time_hist[:, 7])
+        axs2[1, 0].set_xlabel('Time')
+        axs2[1, 0].set_ylabel('Roll')
+        axs2[1, 0].set_title('Roll vs Time')
+
+        axs2[1, 1].plot(self.time_hist[:, 0], self.time_hist[:, 8])
+        axs2[1, 1].set_xlabel('Time')
+        axs2[1, 1].set_ylabel('Pitch')
+        axs2[1, 1].set_title('Pitch vs Time')
+
+        axs2[1, 2].plot(self.time_hist[:, 0], self.time_hist[:, 9])
+        axs2[1, 2].set_xlabel('Time')
+        axs2[1, 2].set_ylabel('Yaw')
+        axs2[1, 2].set_title('Yaw vs Time')
+
+        axs2[2, 0].plot(self.time_hist[:, 0], self.time_hist[:, 10])
+        axs2[2, 0].set_xlabel('Time')
+        axs2[2, 0].set_ylabel('Accelerometer X Bias')
+        axs2[2, 0].set_title('Accelerometer X Bias vs Time')
+
+        axs2[2, 1].plot(self.time_hist[:, 0], self.time_hist[:, 11])
+        axs2[2, 1].set_xlabel('Time')
+        axs2[2, 1].set_ylabel('Accelerometer Y Bias')
+        axs2[2, 1].set_title('Accelerometer Y Bias vs Time')
+
+        axs2[2, 2].plot(self.time_hist[:, 0], self.time_hist[:, 12])
+        axs2[2, 2].set_xlabel('Time')
+        axs2[2, 2].set_ylabel('Accelerometer Z Bias')
+        axs2[2, 2].set_title('Accelerometer Z Bias vs Time')
+
+        axs2[3, 0].plot(self.time_hist[:, 0], self.time_hist[:, 13])
+        axs2[3, 0].set_xlabel('Time')
+        axs2[3, 0].set_ylabel('Gyroscope X Bias')
+        axs2[3, 0].set_title('Gyroscope X Bias vs Time')
+
+        axs2[3, 1].plot(self.time_hist[:, 0], self.time_hist[:, 14])
+        axs2[3, 1].set_xlabel('Time')
+        axs2[3, 1].set_ylabel('Gyroscope Y Bias')
+        axs2[3, 1].set_title('Gyroscope Y Bias vs Time')
+
+        axs2[3, 2].plot(self.time_hist[:, 0], self.time_hist[:, 15])
+        axs2[3, 2].set_xlabel('Time')
+        axs2[3, 2].set_ylabel('Gyroscope Z Bias')
+        axs2[3, 2].set_title('Gyroscope Z Bias vs Time')
+        plt.show()
 
         return 1
 
@@ -306,82 +376,8 @@ def main():
     imu_data = np.loadtxt('imu.txt', delimiter=',', dtype=float)
     
     data = LooseGnssIns(gps_data, imu_data)
-    time_hist = data.compute_time_history()
-
-    # FIGURE 1
-    fig1, axs1 = plt.subplots(1, 2)
-    axs1[0].plot(time_hist[:, 2], time_hist[:, 1])
-    axs1[0].set_xlabel('East')
-    axs1[0].set_ylabel('North')
-    axs1[0].set_title('East vs North')
-
-    axs1[1].plot(time_hist[:, 0], time_hist[:, 3])
-    axs1[1].set_xlabel('Time')
-    axs1[1].set_ylabel('Altitude')
-    axs1[1].set_title('Altitude vs Time')
-    
-    # FIGURE 2
-    # fig2, axs2 = plt.subplots(4, 3)
-    # axs2[0, 0].plot(time_hist[:, 0], time_hist[:, 4])
-    # axs2[0, 0].set_xlabel('Time')
-    # axs2[0, 0].set_ylabel('North Velocity')
-    # axs2[0, 0].set_title('North Velocity vs Time')
-
-    # axs2[0, 1].plot(time_hist[:, 0], time_hist[:, 5])
-    # axs2[0, 1].set_xlabel('Time')
-    # axs2[0, 1].set_ylabel('East Velocity')
-    # axs2[0, 1].set_title('East Velocity vs Time')
-
-    # axs2[0, 2].plot(time_hist[:, 0], time_hist[:, 6])
-    # axs2[0, 2].set_xlabel('Time')
-    # axs2[0, 2].set_ylabel('Down Velocity')
-    # axs2[0, 2].set_title('Down Velocity vs Time')
-
-    # axs2[1, 0].plot(time_hist[:, 0], time_hist[:, 7])
-    # axs2[1, 0].set_xlabel('Time')
-    # axs2[1, 0].set_ylabel('Roll')
-    # axs2[1, 0].set_title('Roll vs Time')
-
-    # axs2[1, 1].plot(time_hist[:, 0], time_hist[:, 8])
-    # axs2[1, 1].set_xlabel('Time')
-    # axs2[1, 1].set_ylabel('Pitch')
-    # axs2[1, 1].set_title('Pitch vs Time')
-
-    # axs2[1, 2].plot(time_hist[:, 0], time_hist[:, 9])
-    # axs2[1, 2].set_xlabel('Time')
-    # axs2[1, 2].set_ylabel('Yaw')
-    # axs2[1, 2].set_title('Yaw vs Time')
-
-    # axs2[2, 0].plot(time_hist[:, 0], time_hist[:, 10])
-    # axs2[2, 0].set_xlabel('Time')
-    # axs2[2, 0].set_ylabel('Accelerometer X Bias')
-    # axs2[2, 0].set_title('Accelerometer X Bias vs Time')
-
-    # axs2[2, 1].plot(time_hist[:, 0], time_hist[:, 11])
-    # axs2[2, 1].set_xlabel('Time')
-    # axs2[2, 1].set_ylabel('Accelerometer Y Bias')
-    # axs2[2, 1].set_title('Accelerometer Y Bias vs Time')
-
-    # axs2[2, 2].plot(time_hist[:, 0], time_hist[:, 12])
-    # axs2[2, 2].set_xlabel('Time')
-    # axs2[2, 2].set_ylabel('Accelerometer Z Bias')
-    # axs2[2, 2].set_title('Accelerometer Z Bias vs Time')
-
-    # axs2[3, 0].plot(time_hist[:, 0], time_hist[:, 13])
-    # axs2[3, 0].set_xlabel('Time')
-    # axs2[3, 0].set_ylabel('Gyroscope X Bias')
-    # axs2[3, 0].set_title('Gyroscope X Bias vs Time')
-
-    # axs2[3, 1].plot(time_hist[:, 0], time_hist[:, 14])
-    # axs2[3, 1].set_xlabel('Time')
-    # axs2[3, 1].set_ylabel('Gyroscope Y Bias')
-    # axs2[3, 1].set_title('Gyroscope Y Bias vs Time')
-
-    # axs2[3, 2].plot(time_hist[:, 0], time_hist[:, 15])
-    # axs2[3, 2].set_xlabel('Time')
-    # axs2[3, 2].set_ylabel('Gyroscope Z Bias')
-    # axs2[3, 2].set_title('Gyroscope Z Bias vs Time')
-    plt.show()
+    data.compute_time_history()
+    data.plot_all()
 
     return 1
 
