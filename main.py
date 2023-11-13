@@ -6,6 +6,9 @@ import navpy as nav
 import scipy.linalg as scila
 from dataclasses import dataclass
 
+# Matplotlib global params
+plt.rcParams['axes.grid'] = True
+
 @dataclass
 class LooseGnssIns:
     """Test"""
@@ -14,16 +17,16 @@ class LooseGnssIns:
     time_hist: np.array = np.zeros((1, 16))
     P: np.array = np.zeros((15, 15))
     DCM: np.array = np.zeros((3, 3))
-    sigma_p: float = 3         # m
-    sigma_v: float = 0.2       # m/s
-    sigma_ba: float = 0.0005   # g s^1/2
-    sigma_bg: float = 0.3 * np.pi / 180      # rad/s^1/2
-    tau_a: float = 300         # s
-    sigma_wa: float = 0.12     # g s^1/2
-    tau_g: float = 300         # s
-    sigma_wg: float = 0.95 * np.pi / 180     # rad/s
-    acc_bias: np.array = np.array([[0.25], [0.077], [-0.12]])
-    gyro_bias: np.array = np.array([[2.4], [-1.3], [5.6]]) * 1e-4
+    sigma_p: float = 3                                              # m
+    sigma_v: float = 0.2                                            # m/s
+    sigma_ba: float = 0.0005                                        # g s^1/2
+    sigma_bg: float = 0.3 * np.pi / 180                             # rad/s^1/2
+    tau_a: float = 300                                              # s
+    sigma_wa: float = 0.12                                          # g s^1/2
+    tau_g: float = 300                                              # s
+    sigma_wg: float = 0.95 * np.pi / 180                            # rad/s
+    acc_bias: np.array = np.array([[0.25], [0.077], [-0.12]])       # m/s*2
+    gyro_bias: np.array = np.array([[2.4], [-1.3], [5.6]]) * 1e-4   # rad/s
     
     def vec_to_skew(self, vec: np.array) -> np.array:
 
@@ -116,8 +119,8 @@ class LooseGnssIns:
 
         lat = position[0]
         h = position[2]
-        vNx = velocity[1]
-        vNy = velocity[0]
+        vNx = velocity[0]
+        vNy = velocity[1]
         phi = euler_angles[0]
         theta = euler_angles[1]
 
@@ -134,13 +137,15 @@ class LooseGnssIns:
                                [-vNx / (self.rad_of_curve('north', lat) + h)], \
                                [-vNy * np.tan(lat) / (self.rad_of_curve('east', lat) + h)]])
         omega_N_IN = omega_N_IE + omega_N_EN
-        omega_B_IB = self.imu_data[idx-1][1:4] + gyro_bias
+        omega_B_IB = self.imu_data[idx][1:4] + gyro_bias
+        # omega_B_IB = self.imu_data[idx - 1][1:4] + gyro_bias
         omega_B_NB = self.transpose_vec(omega_B_IB) \
                     - np.linalg.inv(self.DCM) @ self.transpose_vec(omega_N_IN)
         euler_angles = self.transpose_vec(euler_angles) + time_diff * A_euler @ omega_B_NB
         
         # VELOCITY UPDATE
-        f_B_t = self.imu_data[idx-1][4:7] + acc_bias
+        f_B_t = self.imu_data[idx][4:7] + acc_bias
+        # f_B_t = self.imu_data[idx - 1][4:7] + acc_bias
         f_B = self.transpose_vec(f_B_t)
         g_N = self.gav_vector(lat, h)
         v_N_dot = self.DCM @ f_B + g_N \
@@ -157,8 +162,8 @@ class LooseGnssIns:
         # UPDATING VALUES FOR COVARIANCE UPDATE
         lat = position[0][0]
         h = position[2][0]
-        vNx = velocity[1][0]
-        vNy = velocity[0][0]
+        vNx = velocity[0][0]
+        vNy = velocity[1][0]
         phi = euler_angles[0][0]
         theta = euler_angles[1][0]
         g_N = self.gav_vector(lat, h)
@@ -215,6 +220,7 @@ class LooseGnssIns:
     
     def update_state_ES_EKF(self, idx: int, cur_state: np.array) -> np.array:
         
+        # ES_EKF TIME UPDATE
         ref_location_lla = cur_state[0:3]
         gps_location_lla = self.gps_data[idx][1:4]
         gps_location_ned = nav.lla2ned(gps_location_lla[0], \
@@ -229,14 +235,19 @@ class LooseGnssIns:
         ins_y_vec_ned = np.block([[np.zeros((3,1))], [self.transpose_vec(cur_state[3:6])]])
         del_y = gps_y_vec_ned - ins_y_vec_ned
         H_k = np.block([np.eye(6), np.zeros((6, 9))])
+        # Should this be square root, nothing, or squared?
+        # R_k = np.diagflat([np.sqrt(self.sigma_p), np.sqrt(self.sigma_p), np.sqrt(self.sigma_p), \
+        #                    np.sqrt(self.sigma_v), np.sqrt(self.sigma_v), np.sqrt(self.sigma_v)])
         R_k = np.diagflat([self.sigma_p, self.sigma_p, self.sigma_p, \
-                           self.sigma_v, self.sigma_v, self.sigma_v])
+                           self.sigma_v,self.sigma_v, self.sigma_v])
+        # R_k = np.diagflat([self.sigma_p**2, self.sigma_p**2, self.sigma_p**2, \
+        #                    self.sigma_v**2,self.sigma_v**2, self.sigma_v**2])
         S_k = H_k @ self.P @ np.transpose(H_k) + np.eye(6) @ R_k @ np.eye(6)
         K_k = self.P @ np.transpose(H_k) @ np.linalg.inv(S_k)
         error_state = K_k @ del_y
         self.P = self.P - K_k @ S_k @ np.transpose(K_k)
 
-        # MEASUREMENT UPDATE
+        # ES_EKF MEASUREMENT UPDATE
         error_state_position_ned = error_state[0:3]
         position = cur_state[0:3] + \
                       np.array([error_state_position_ned[0][0] \
@@ -257,7 +268,6 @@ class LooseGnssIns:
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     sinDCM, \
                                     np.arctan(self.DCM[1][0] / self.DCM[0][0])])
-            # print(idx)
         else:
             euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                     -np.arcsin(self.DCM[2][0]), \
@@ -293,14 +303,23 @@ class LooseGnssIns:
     
     def plot_all(self):
 
+        ref_loc = self.time_hist[0][1:4]
+        loc_hist_ned = nav.lla2ned(self.time_hist[:, 1], \
+                                   self.time_hist[:, 2], \
+                                   self.time_hist[:, 3], \
+                                   ref_loc[0], \
+                                   ref_loc[1], \
+                                   ref_loc[2], \
+                                   latlon_unit='rad')
+
         # FIGURE 1
         fig1, axs1 = plt.subplots(1, 2)
-        axs1[0].plot(self.time_hist[:, 2], self.time_hist[:, 1])
+        axs1[0].plot(loc_hist_ned[:, 1], loc_hist_ned[:, 0])
         axs1[0].set_xlabel('East')
         axs1[0].set_ylabel('North')
         axs1[0].set_title('East vs North')
 
-        axs1[1].plot(self.time_hist[:, 0], self.time_hist[:, 3])
+        axs1[1].plot(self.time_hist[:, 0], - loc_hist_ned[:, 2])
         axs1[1].set_xlabel('Time')
         axs1[1].set_ylabel('Altitude')
         axs1[1].set_title('Altitude vs Time')
