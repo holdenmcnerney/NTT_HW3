@@ -289,6 +289,7 @@ class LooseGnssIns:
         
         # Something is wrong here when adding error state euler angle skew matrix
         # if logic is incorrect but makes the script run
+        ########################################################################
         curDCMval = self.DCM[2][0]
         self.DCM = (np.eye(3) - self.vec_to_skew(error_state[6:9])) @ self.DCM
         if np.isnan(-np.arcsin(self.DCM[2][0])):
@@ -296,6 +297,7 @@ class LooseGnssIns:
         euler_angles = np.array([np.arctan(self.DCM[2][1] / self.DCM[2][2]), \
                                 -np.arcsin(self.DCM[2][0]), \
                                 np.arctan(self.DCM[1][0] / self.DCM[0][0])])
+        ########################################################################
     
         self.acc_bias = self.acc_bias + error_state[9:12]
         self.gyro_bias = self.gyro_bias + error_state[12:15]
